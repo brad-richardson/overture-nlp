@@ -1,14 +1,23 @@
-from ollama import Client
-import json
-import time
 import argparse
-import pathlib
 import csv
+import json
+import pathlib
+import time
+from datetime import datetime
+
+from llama_cpp import Llama
+
+# MODEL_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+# MODEL_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q6_K_L.gguf"
+
+MODEL_REPO = "bartowski/Llama-3.2-3B-Instruct-GGUF"
+MODEL_FILENAME = "Llama-3.2-3B-Instruct-Q6_K_L.gguf"
 
 
-def create_lv_prompt(name_to_test: str) -> str:
+def create_lv_system_prompt() -> str:
+    # TODO - this needs work
     return f"""
-    Assess whether the crowd-sourced map feature from OpenStreetMap with the name "{name_to_test}" is correctly labeled as specifically for English map users.
+    Assess whether the provided name for a crowd-sourced map feature from OpenStreetMap is correctly labeled as specifically for English map users.
 
     Please provide a label of either `no_issue` or `invalid`. Then, give it a risk score between 0.0 and 1.0, where 0.0 means this is definitely intended for English readers on the map and 1.0 means not an English name and could not possibly be interpreted as such. Also include a brief paragraph describing reasoning.
 
@@ -16,110 +25,184 @@ def create_lv_prompt(name_to_test: str) -> str:
     """
 
 
-def create_vandalism_prompt(name_to_test: str) -> str:
-    return f"""
-    Assess whether the crowd-sourced map feature from OpenStreetMap with the name "{name_to_test}" is vandalism or profane or would not be used to describe real world features like roads, buildings, places or POIs. Note that these can be in any world language, not just English.
+def evaluate_language_validation(llm):
+    # TODO - this needs work
+    system_prompt = create_lv_system_prompt()
+    allowed_labels = ["no_issue", "invalid"]
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string", "enum": allowed_labels},
+            "reason": {"type": "string"},
+        },
+        "required": ["label", "reason"],
+    }
+    user_prompt = "TODO"
 
-    Please provide a label of either "vandalism" or "regular", rate it between 0.0 and 1.0, where 0.0 means a name that has no chance of being vandalism and could appear on e.g. a car nav system and 1.0 means this is very likely an invalid or vandalized name in this context. Also a brief paragraph describing reasoning.
+    try:
+        generated = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            response_format={
+                "type": "json_object",
+                "schema": json_schema,
+            },
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=1024,
+        )
+
+        response = json.loads(generated.get("choices")[0].get("message").get("content"))
+
+        return response
+    except Exception as e:
+        print(f"Error processing row: {e}")
+        return None
+
+
+def create_vandalism_system_prompt() -> str:
+    return """
+    You are a senior map QA analyst, tasked with reviewing name changes to prevent offensive content from being shown to end users.
+
+    These feature names are crowd-sourced from OpenStreetMap and could contain vandalism, profanity, vulgarities or suspicious changes (typos, test data, names from fictional works).
+    Note that these names may be in any language, not just English. During assessment, please consider diverse political, lingual, socioconomic and geographic viewpoints in the evaluation.
+
+    Please provide the following:
+    - a label of "profanity", "vandalism", "suspicious" or "no_issue"
+    - a risk score between 0.0 and 1.0, where 0.0 indicates the name has no chance of being problematic and could appear on e.g. a car nav system and 1.0 means definitely an issue and likely to be offensive or unwelcome
+    - a brief (<=2 sentences) reasoning for the rating
+
+    Additional prompt context may be provided, such as language code, previous name and the feature's OSM tags as JSON. These fields should be used as context only, and not directly considered for the output label and score.
     """
 
 
-def evaluate_prompts(model_name, csv_path, eval_type):
-    # Initialize local Ollama client
-    client = Client()
+def evaluate_vandalism(
+    llm, new_name, old_name, target_language_code, filtered_tags_json
+):
+    system_prompt = create_vandalism_system_prompt()
+
+    # Build user prompt
+    if not new_name:
+        user_prompt = "Name was removed\n"
+    else:
+        user_prompt = f"New name: '{new_name}'\n"
+    if target_language_code:
+        user_prompt += f"Target language code: '{target_language_code}'\n"
+    if old_name:
+        user_prompt += f"Old name: '{old_name}'\n"
+    if filtered_tags_json:
+        user_prompt += f"Tags: {filtered_tags_json}\n"
+
+    allowed_labels = ["profanity", "vandalism", "suspicious", "no_issue"]
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string", "enum": allowed_labels},
+            "risk_score": {"type": "number"},
+            "reason": {"type": "string"},
+        },
+        "required": ["label", "risk_score", "reason"],
+    }
+
+    try:
+        generated = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            response_format={
+                "type": "json_object",
+                "schema": json_schema,
+            },
+            # Low temperature for predictability, high top_p for diversity
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=2048,
+        )
+
+        response = json.loads(generated.get("choices")[0].get("message").get("content"))
+
+        response["new_name"] = new_name
+        response["old_name"] = old_name
+        return response
+    except Exception as e:
+        print(f"Error processing row: {e}")
+        return None
+
+
+def evaluate_prompts(csv_path, eval_type):
+    print(f"Loading model {MODEL_FILENAME}")
+    llm = Llama.from_pretrained(
+        repo_id=MODEL_REPO,
+        filename=MODEL_FILENAME,
+        verbose=False,
+    )
+    print(f"Loaded model {MODEL_FILENAME}")
 
     # Read CSV file
-    reader = csv.DictReader(open(csv_path), delimiter=",")
+    with open(csv_path, "rb") as f:
+        num_lines = sum(1 for _ in f)
 
-    # Initialize results tracking
-    correct = 0
-    results = []
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f, delimiter=",")
 
-    idx = 0
-    for row in reader:
-        idx += 1
+        correct = 0
+        results = []
 
-        if idx % 50 == 0 and idx > 0:
-            print(f"At {idx}, accuracy: {correct/(idx):.2%}")
+        index = 0
+        for row in reader:
+            index += 1
 
-        if eval_type == "language-validation":
-            prompt = create_lv_prompt(row.get("name_tag"))
-            allowed_labels = ["no_issue", "invalid"]
-        elif eval_type == "vandalism":
-            prompt = create_vandalism_prompt(row.get("name_tag"))
-            allowed_labels = ["regular", "vandalism"]
+            # Print progress every 10%
+            if index % round(num_lines / 10) == 0 and index > 0:
+                print(f"{datetime.now()}: At index {index}")
 
-        try:
-            # Generate response using Ollama
-            generated = client.generate(
-                model=model_name,
-                prompt=prompt,
-                stream=False,
-                format={
-                    "type": "object",
-                    "properties": {
-                        "label": {"type": "string", "enum": allowed_labels},
-                        "risk_score": {"type": "number"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["label", "risk_score", "reason"],
-                },
-            )
-
-            response = json.loads(generated.response)
-
-            if response.get("label", "") == row["label"]:
-                correct += 1
-            elif response.get("label", "") not in allowed_labels:
-                raise RuntimeError("Invalid label provided")
+            # Run evaluation
+            if eval_type == "language-validation":
+                result = evaluate_language_validation(llm)
+            elif eval_type == "vandalism":
+                # TODO - remaining params
+                result = evaluate_vandalism(llm, row.get("name_tag"), "", "", "")
+                if result:
+                    result["expected"] = row.get("label")
             else:
-                # print(f"Mismatch for {row['name_tag']} | expected {row['label']} | score {response.get("risk_score")}")
-                pass
+                raise ValueError(f"Unknown eval type: {eval_type}")
 
-            response["name_tag"] = row.get("name_tag")
-            response["expected"] = row.get("label")
-            results.append(response)
-        except Exception as e:
-            print(f"Error processing row {idx}: {e}")
-            exit(1)
+            if result:
+                results.append(result)
+                if result["label"] != "no_issue" and result["expected"] != "regular":
+                    correct += 1
+                elif result["label"] == "no_issue" and result["expected"] == "regular":
+                    correct += 1
 
-    return results, correct / (idx + 1)
+    return results, correct / index
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(prog="Overture NLP")
 
     parser.add_argument("filename")
     parser.add_argument("--type", choices=["language-validation", "vandalism"])
-    parser.add_argument("--model")
-    parser.add_argument("--all-models", action="store_true")
     parser.add_argument("--log-dir", default="./logs")
 
     args = parser.parse_args()
 
-    if not args.all_models and not args.model:
-        print("Need --model or --all-models set")
-        exit(1)
-
     pathlib.Path(args.log_dir).mkdir(parents=True, exist_ok=True)
 
-    models = (
-        ["llama3.2:1b", "llama3.2:3b", "phi4:14b", "deepseek-r1:14b"]
-        if args.all_models
-        else [args.model]
-    )
+    t0 = time.time()
+    results, accuracy = evaluate_prompts(args.filename, args.type)
+    t1 = time.time()
 
-    print(f"Evaluating {args.type} for models {models}")
-    for model in models:
-        print(f"\nModel {model}")
-
-        t0 = time.time()
-        results, accuracy = evaluate_prompts(model, args.filename, args.type)
-        t1 = time.time()
-
-        print(f"Overall Accuracy: {accuracy:.2%}")
-        print(f"Total time (min): {(t1-t0)/60.0:.2}")
-        model_log_path = f"{args.log_dir}/vandalism_{model.replace(':', '_')}.json"
-        with open(model_log_path, "w") as f:
-            json.dump(results, f, indent=4)
+    print(f"Overall Accuracy: {accuracy:.2%}")
+    print(f"Total time (min): {(t1-t0)/60.0:.2}")
+    model_log_path = f"{args.log_dir}/{args.type}.json"
+    with open(model_log_path, "w") as f:
+        json.dump(results, f, indent=4)
