@@ -1,0 +1,21 @@
+osm_id,osm_type,version,new_name,changeset,timestamp,uid,label
+6013358841,node,1,test,63875490,1540487651,94,vandalism
+240116744,node,6,M_ü_h_l_e_n_f_l_i_e_ß,74149364,1567713956,84566,vandalism
+7194706755,node,1,???????,80715358,1581143365,151425,vandalism
+7107665991,node,3,Green-haired Lady with a goat yelling at Prime Minister to get more money after bush fire.,79353006,1578510541,162827,vandalism
+377098186,way,3,Slum,43454645,1478478267,186592,vandalism
+5610389659,node,2,Нехай щастить!,78156883,1575902288,281865,vandalism
+758494590,way,1,З Новим Роком!,78842491,1577267830,288500,vandalism
+663102894,way,3,Am Klärwerk,80811497,1581360911,1910721,vandalism
+4816458282,node,1,Erotic City,48139766,1493149055,2037651,vandalism
+4076040924,node,1,It's Really Here!,38030705,1458774675,2063187,vandalism
+6044877794,node,1,Pokemon/Ingress Stop,64273694,1541624125,2806006,vandalism
+33624180,node,1,Nikkaroinen,192385,1186397263,0,regular
+50875849,way,9,Arroyo Verde Court,75628934,1570984745,1,regular
+147038615,way,2,Keetley Close,10525847,1327791604,64,regular
+156211402,way,1,Appleton Avenue,11054161,1332349122,64,regular
+42740756,way,5,Betony Road,11095117,1332682318,64,regular
+32017924,way,16,Enterprise Way,17483917,1377349703,64,regular
+61638638,way,8,Oddington Road,26068258,1413280578,64,regular
+107999482,way,3,Fladbury CofE First School,36625455,1452984980,64,regular
+392360925,way,1,St George's RC Primary School,36689894,1453242003,64,regular

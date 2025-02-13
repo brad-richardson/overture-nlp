@@ -4,15 +4,23 @@ import json
 import pathlib
 import time
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
+from dataclasses import dataclass, field
+import pandas as pd
 
 from llama_cpp import Llama
 
-# MODEL_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
-# MODEL_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q6_K_L.gguf"
+# 3.3 70B - needs large GPU, likely not runnable locally
+# MODEL_REPO = "bartowski/Llama-3.3-70B-Instruct-GGUF"
+# MODEL_FILENAME = "Llama-3.3-70B-Instruct-Q4_K_M.gguf"
 
-MODEL_REPO = "bartowski/Llama-3.2-3B-Instruct-GGUF"
-MODEL_FILENAME = "Llama-3.2-3B-Instruct-Q6_K_L.gguf"
+# 3.1 8B
+MODEL_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+MODEL_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+
+# 3.2 3B
+# MODEL_REPO = "bartowski/Llama-3.2-3B-Instruct-GGUF"
+# MODEL_FILENAME = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 
 
 def create_lv_system_prompt() -> str:
@@ -146,8 +154,100 @@ def evaluate_vandalism(
             print(generated)
         return None
 
+@dataclass
+class EvaluationResult:
+    false_negatives: int = 0
+    false_positives: int = 0
+    true_negative: int = 0
+    true_positive: int = 0
+    evaluations: List[Dict] = field(default_factory=lambda: list())
 
-def evaluate_prompts(eval_type: str, csv_path: str) -> Tuple[list, float]:
+    def increment_false_negative(self, amount: int = 1):
+        self.false_negatives += amount
+
+    def increment_false_positive(self, amount: int = 1):
+        self.false_positives += amount
+
+    def increment_true_negative(self, amount: int = 1):
+        self.true_negative += amount
+
+    def increment_true_positive(self, amount: int = 1):
+        self.true_positive += amount
+    
+    def add_evaluation(self, result: dict):
+        self.evaluations.append(result)
+
+    @property
+    def total_samples(self) -> int:
+        return (self.false_negatives + self.false_positives + 
+                self.true_negative + self.true_positive)
+
+    @property
+    def accuracy(self) -> float:
+        """
+        Calculate accuracy: (TP + TN) / (TP + TN + FP + FN)
+        Returns:
+            float: Accuracy score between 0 and 1
+        """
+        total = self.total_samples
+        if total == 0:
+            return 0.0
+        return (self.true_positive + self.true_negative) / total
+
+    @property
+    def precision(self) -> float:
+        """
+        Calculate precision: TP / (TP + FP)
+        Returns:
+            float: Precision score between 0 and 1
+        """
+        denominator = self.true_positive + self.false_positives
+        if denominator == 0:
+            return 0.0
+        return self.true_positive / denominator
+
+    @property
+    def recall(self) -> float:
+        """
+        Calculate recall: TP / (TP + FN)
+        Returns:
+            float: Recall score between 0 and 1
+        """
+        denominator = self.true_positive + self.false_negatives
+        if denominator == 0:
+            return 0.0
+        return self.true_positive / denominator
+
+    @property
+    def f1_score(self) -> float:
+        """
+        Calculate F1 score: 2 * (precision * recall) / (precision + recall)
+        Returns:
+            float: F1 score between 0 and 1
+        """
+        precision = self.precision
+        recall = self.recall
+        if precision + recall == 0:
+            return 0.0
+        return 2 * (precision * recall) / (precision + recall)
+
+    def __str__(self) -> str:
+        """Pretty string representation of metrics"""
+        return (
+            f"Evaluation Metrics:\n"
+            f"  Total Samples: {self.total_samples}\n"
+            f"  Accuracy:  {self.accuracy:.3f}\n"
+            f"  Precision: {self.precision:.3f}\n"
+            f"  Recall:    {self.recall:.3f}\n"
+            f"  F1 Score:  {self.f1_score:.3f}\n"
+            f"  Counts:\n"
+            f"    True Positives:  {self.true_positive}\n"
+            f"    True Negatives:  {self.true_negative}\n"
+            f"    False Positives: {self.false_positives}\n"
+            f"    False Negatives: {self.false_negatives}"
+        )
+
+def evaluate_prompts(eval_type: str, csv_path: str) -> EvaluationResult:
     print(f"Loading model {MODEL_FILENAME}")
     llm = Llama.from_pretrained(
         repo_id=MODEL_REPO,
@@ -158,14 +258,15 @@ def evaluate_prompts(eval_type: str, csv_path: str) -> Tuple[list, float]:
     print(f"Loaded model {MODEL_FILENAME}")
 
     # Read CSV file
+    # pd.read_csv()
     with open(csv_path, "rb") as f:
         num_lines = sum(1 for _ in f)
 
     with open(csv_path, "r") as f:
+        # df = pd.read_csv(f)
         reader = csv.DictReader(f, delimiter=",")
 
-        correct = 0
-        results = []
+        eval_result = EvaluationResult()
 
         index = 0
         for row in reader:
@@ -177,9 +278,9 @@ def evaluate_prompts(eval_type: str, csv_path: str) -> Tuple[list, float]:
 
             # Run evaluation
             if eval_type == "language-validation":
-                result = evaluate_language_validation(llm)
+                evaluation = evaluate_language_validation(llm)
             elif eval_type == "vandalism":
-                result = evaluate_vandalism(
+                evaluation = evaluate_vandalism(
                     llm,
                     new_name=row.get("new_name"),
                     old_name=row.get("old_name"),
@@ -189,42 +290,47 @@ def evaluate_prompts(eval_type: str, csv_path: str) -> Tuple[list, float]:
             else:
                 raise ValueError(f"Unknown eval type: {eval_type}")
 
-            if result:
-                results.append(result)
+            if evaluation:
                 if "label" in row:
-                    result["expected_label"] = row.get("label")
-                    if (
-                        result["expected_label"] in ["no_issue", "not_an_issue"]
-                        and result["label"] == "no_issue"
-                    ):
-                        correct += 1
-                    elif (
-                        result["expected_label"] not in ["no_issue", "not_an_issue"]
-                        and result["label"] != "no_issue"
-                    ):
-                        correct += 1
+                    evaluation["expected_label"] = row.get("label")
 
-    return results, correct / index
+                    predicted_issue = evaluation["label"] != "no_issue"
+                    expected_issue = evaluation["expected_label"] not in ["no_issue", "not_an_issue"]
+                    if predicted_issue and expected_issue:
+                        eval_result.increment_true_positive()
+                    elif not predicted_issue and not expected_issue:
+                        eval_result.increment_true_negative()
+                    elif predicted_issue and not expected_issue:
+                        eval_result.increment_false_positive()
+                    else:
+                        eval_result.increment_false_negative()
+                
+                eval_result.add_evaluation(evaluation)
+
+    return eval_result
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Overture NLP")
 
-    parser.add_argument("filename")
     parser.add_argument("--type", choices=["language-validation", "vandalism"])
     parser.add_argument("--out", default="./output")
+    parser.add_argument("--input-csv")
 
     args = parser.parse_args()
 
     pathlib.Path(args.out).mkdir(parents=True, exist_ok=True)
 
+    input_csv = args.input_csv
+
     t0 = time.time()
-    results, accuracy = evaluate_prompts(eval_type=args.type, csv_path=args.filename)
+    eval_result = evaluate_prompts(eval_type=args.type, csv_path=input_csv)
     t1 = time.time()
 
-    if accuracy > 0:
-        print(f"Overall Accuracy: {accuracy:.2%}")
-    print(f"Total time (sec): {(t1-t0):.2}")
+    print(f"Total time (sec): {(t1-t0):.2f}")
     model_results_path = f"{args.out}/{args.type}.json"
     with open(model_results_path, "w") as f:
-        json.dump(results, f, indent=4)
+        json.dump(eval_result.evaluations, f, indent=4)
+    if eval_result.total_samples > 0:
+        print(eval_result)
+    
