@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import json
 import pathlib
@@ -6,13 +7,10 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass, field
-import pandas as pd
+# import pandas as pd
 
 from llama_cpp import Llama
-
-# 3.3 70B - needs large GPU, likely not runnable locally
-# MODEL_REPO = "bartowski/Llama-3.3-70B-Instruct-GGUF"
-# MODEL_FILENAME = "Llama-3.3-70B-Instruct-Q4_K_M.gguf"
+import openai
 
 # 3.1 8B
 MODEL_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
@@ -73,9 +71,52 @@ def evaluate_language_validation(llm):
         print(f"Error processing row: {e}")
         return None
 
+@dataclass
+class EvalBackend:
+    openai_client: openai.OpenAI = None
+    local_llm: Llama = None
 
-def create_vandalism_system_prompt() -> str:
-    return """
+    def set_openai_client(self, client: openai.OpenAI):
+        self.local_llm = None
+        self.openai_client = client
+
+    def set_llama_model(self, model: Llama):
+        self.local_llm = model
+        self.openai_client = None
+
+    def create_chat_completion(self, system_prompt: str, user_prompt: str, response_format: dict, **kwargs) -> dict:
+        if self.local_llm:
+            generated = self.local_llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": user_prompt,
+                    },
+                ],
+                response_format=response_format,
+                **kwargs
+            )
+            raw_response = generated.get("choices")[0].get("message").get("content")
+            return json.loads(raw_response)
+        elif self.openai_client:
+            generated = self.openai_client.chat.completions.create(
+                model=MODEL_FILENAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format=response_format,
+                **kwargs,
+            )
+            raw_response = generated.choices[0].message.content
+            return json.loads(raw_response)
+        else:
+            raise RuntimeError("No eval backend setup")
+
+
+def create_vandalism_system_prompt(debug: bool = True) -> str:
+    return f"""
     You are a senior map QA analyst, tasked with reviewing name changes to prevent offensive content from being shown to end users.
 
     These feature names are crowd-sourced from OpenStreetMap and could contain vandalism, profanity, vulgarities or suspicious changes (typos, test data, names from fictional works).
@@ -83,22 +124,23 @@ def create_vandalism_system_prompt() -> str:
 
     Please provide the following:
     - a label of "vandalism", "profanity", "suspicious" or "no_issue"
-    - a risk score between 0.0 and 1.0, where 0.0 indicates the name has no chance of being problematic and could appear on e.g. a car nav system and 1.0 means definitely an issue and likely to be offensive or unwelcome
-    - a brief (2 sentences) reasoning for the rating
+    - a risk score between 0.0 and 1.0, where 0.0 indicates the name has no chance of being problematic and could appear on e.g. a car nav system and 1.0 means definitely an issue and generally offensive or unwelcome
+    {"- a brief (2 sentences) reasoning for the rating" if debug else ""}
 
     Additional prompt context may be provided, such as tag key (indicating language or special name type), previous name and the feature's OSM tags as JSON. These fields should be used as context only, and not directly considered for the output label and score.
     """
 
 
 def evaluate_vandalism(
-    llm,
+    eval_backend,
+    system_prompt: str,
     new_name: Optional[str],
     old_name: Optional[str],
     name_key: Optional[str],
     filtered_tags_json: Optional[str],
+    expected_label: Optional[str],
+    debug: bool = False,
 ) -> Optional[dict]:
-    system_prompt = create_vandalism_system_prompt()
-
     # Build user prompt
     if not new_name:
         user_prompt = "Name was removed\n"
@@ -117,21 +159,19 @@ def evaluate_vandalism(
         "properties": {
             "label": {"type": "string", "enum": allowed_labels},
             "risk_score": {"type": "number"},
-            "reason": {"type": "string"},
         },
-        "required": ["label", "risk_score", "reason"],
+        "required": ["label", "risk_score"],
     }
+    if debug:
+        # Adds significant overhead to generation, default to not include this
+        json_schema["properties"]["reason"] = {"type": "string"}
+        json_schema["required"].append("reason")
 
     generated = None
     try:
-        generated = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
+        response = eval_backend.create_chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             response_format={
                 "type": "json_object",
                 "schema": json_schema,
@@ -141,12 +181,11 @@ def evaluate_vandalism(
             top_p=0.9,
         )
 
-        raw_response = generated.get("choices")[0].get("message").get("content")
-        response = json.loads(raw_response)
-
         response["prompt"] = user_prompt
         response["new_name"] = new_name
         response["old_name"] = old_name
+        if expected_label:
+            response["expected_label"] = expected_label
         return response
     except Exception as e:
         print(f"Error processing row: {e}")
@@ -247,17 +286,31 @@ class EvaluationResult:
             f"    False Negatives: {self.false_negatives}"
         )
 
-def evaluate_prompts(eval_type: str, csv_path: str) -> EvaluationResult:
-    print(f"Loading model {MODEL_FILENAME}")
-    llm = Llama.from_pretrained(
-        repo_id=MODEL_REPO,
-        filename=MODEL_FILENAME,
-        n_ctx=2048,
-        verbose=False,
-    )
-    print(f"Loaded model {MODEL_FILENAME}")
+def evaluate_prompts(eval_type: str, backend: str, csv_path: str, threads: int) -> EvaluationResult:
 
-    # Read CSV file
+    eval_backend = EvalBackend()
+    if backend == "llama-cpp":
+        # Not thread-safe
+        threads = 1
+        print(f"Loading model {MODEL_FILENAME}")
+        llm = Llama.from_pretrained(
+            repo_id=MODEL_REPO,
+            filename=MODEL_FILENAME,
+            n_ctx=4096,
+            verbose=False,
+        )
+        eval_backend.set_llama_model(llm)
+        print(f"Loaded model {MODEL_FILENAME}")
+    elif backend == "llama-cpp-server":
+        openai_client = openai.OpenAI(
+            base_url="http://localhost:8080/v1",
+            api_key = "sk-no-key-required"
+        )
+        eval_backend.set_openai_client(openai_client)
+    else:
+        raise ValueError(f"Invalid backend option: {backend}")
+
+    # Quickly read CSV to get total row count
     # pd.read_csv()
     with open(csv_path, "rb") as f:
         num_lines = sum(1 for _ in f)
@@ -268,44 +321,56 @@ def evaluate_prompts(eval_type: str, csv_path: str) -> EvaluationResult:
 
         eval_result = EvaluationResult()
 
-        index = 0
-        for row in reader:
-            index += 1
+        system_prompt = create_vandalism_system_prompt()
 
-            # Print progress every 10%
-            if index % round(num_lines / 10) == 0 and index > 0:
-                print(f"{datetime.now()}: At index {index}")
+        results = []
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = []
 
-            # Run evaluation
-            if eval_type == "language-validation":
-                evaluation = evaluate_language_validation(llm)
-            elif eval_type == "vandalism":
-                evaluation = evaluate_vandalism(
-                    llm,
-                    new_name=row.get("new_name"),
-                    old_name=row.get("old_name"),
-                    name_key=row.get("tag"),
-                    filtered_tags_json=row.get("filtered_tags"),
-                )
-            else:
-                raise ValueError(f"Unknown eval type: {eval_type}")
+            # Submit all tasks
+            for row in reader:
+                if eval_type == "language-validation":
+                    # TODO - update this, handle concurrency
+                    # evaluation = evaluate_language_validation(eval_backend)
+                    pass
+                elif eval_type == "vandalism":
+                    future = executor.submit(evaluate_vandalism, eval_backend=eval_backend,
+                        system_prompt=system_prompt,
+                        new_name=row.get("new_name"),
+                        old_name=row.get("old_name"),
+                        name_key=row.get("tag"),
+                        filtered_tags_json=row.get("filtered_tags"),
+                        expected_label=row.get("label", ""))
+                    futures.append(future)
+                else:
+                    raise ValueError(f"Unknown eval type: {eval_type}")
 
-            if evaluation:
-                if "label" in row:
-                    evaluation["expected_label"] = row.get("label")
+            
+            # Collect results as they complete
+            for future in futures:
+                try:
+                    evaluation = future.result()
 
-                    predicted_issue = evaluation["label"] != "no_issue"
-                    expected_issue = evaluation["expected_label"] not in ["no_issue", "not_an_issue"]
-                    if predicted_issue and expected_issue:
-                        eval_result.increment_true_positive()
-                    elif not predicted_issue and not expected_issue:
-                        eval_result.increment_true_negative()
-                    elif predicted_issue and not expected_issue:
-                        eval_result.increment_false_positive()
-                    else:
-                        eval_result.increment_false_negative()
+                    if evaluation:
+                        if "expected_label" in evaluation:
+                            predicted_issue = evaluation["label"] != "no_issue"
+                            expected_issue = evaluation["expected_label"] not in ["no_issue", "not_an_issue"]
+                            if predicted_issue and expected_issue:
+                                eval_result.increment_true_positive()
+                            elif not predicted_issue and not expected_issue:
+                                eval_result.increment_true_negative()
+                            elif predicted_issue and not expected_issue:
+                                eval_result.increment_false_positive()
+                            else:
+                                eval_result.increment_false_negative()
+                        
+                        eval_result.add_evaluation(evaluation)
+                except Exception as e:
+                    print(f"TODO - failure grabbing result, {e}")
                 
-                eval_result.add_evaluation(evaluation)
+                # Print progress every 1%
+                if len(eval_result.evaluations) % max(1, round(num_lines / 100)) == 0:
+                    print(f"{datetime.now()}: Evaluated {len(eval_result.evaluations)}/{num_lines}")
 
     return eval_result
 
@@ -315,7 +380,12 @@ if __name__ == "__main__":
 
     parser.add_argument("--type", choices=["language-validation", "vandalism"])
     parser.add_argument("--out", default="./output")
+    # llama-cpp uses python library directly and is the easiest method for macOS
+    # llama-cpp-server can point at a locally running service (recommended to use docker)
+    parser.add_argument("--backend", choices=["llama-cpp", "llama-cpp-server"], default="llama-cpp")
+    parser.add_argument("--server-url")
     parser.add_argument("--input-csv")
+    parser.add_argument("--threads", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -324,7 +394,7 @@ if __name__ == "__main__":
     input_csv = args.input_csv
 
     t0 = time.time()
-    eval_result = evaluate_prompts(eval_type=args.type, csv_path=input_csv)
+    eval_result = evaluate_prompts(eval_type=args.type, backend=args.backend, threads=args.threads, csv_path=input_csv)
     t1 = time.time()
 
     print(f"Total time (sec): {(t1-t0):.2f}")

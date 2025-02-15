@@ -1,6 +1,8 @@
 output/
 out/
 logs/
+models/
+llama-cpp-bin/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
