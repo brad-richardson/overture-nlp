@@ -2,7 +2,8 @@ output/
 out/
 logs/
 models/
-llama-cpp-bin/
+build/
+*.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
