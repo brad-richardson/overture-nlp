@@ -10,8 +10,6 @@ from dataclasses import dataclass, field
 
 # import pandas as pd
 
-from llama_cpp import Llama
-import openai
 
 # 3.1 8B
 MODEL_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
@@ -22,16 +20,12 @@ MODEL_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 # MODEL_FILENAME = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 
 
-@dataclass
 class EvalBackend:
-    openai_client: openai.OpenAI = None
-    local_llm: Llama = None
-
     def set_openai_client(self, client: openai.OpenAI):
         self.local_llm = None
         self.openai_client = client
 
-    def set_llama_model(self, model: Llama):
+    def set_llama_model(self, model: llama_cpp.Llama):
         self.local_llm = model
         self.openai_client = None
 
@@ -302,10 +296,10 @@ def evaluate_prompts(
 
     eval_backend = EvalBackend()
     if backend == "llama-cpp":
-        # Not thread-safe
-        threads = 1
+        import llama_cpp
+
         print(f"Loading model {MODEL_FILENAME}")
-        llm = Llama.from_pretrained(
+        llm = llama_cpp.Llama.from_pretrained(
             repo_id=MODEL_REPO,
             filename=MODEL_FILENAME,
             n_ctx=4096,
@@ -313,7 +307,12 @@ def evaluate_prompts(
         )
         eval_backend.set_llama_model(llm)
         print(f"Loaded model {MODEL_FILENAME}")
+
+        # Not thread-safe
+        threads = 1
     elif backend == "llama-cpp-server":
+        import openai
+
         openai_client = openai.OpenAI(
             base_url="http://localhost:8080/v1", api_key="sk-no-key-required"
         )
