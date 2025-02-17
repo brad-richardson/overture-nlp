@@ -26,7 +26,7 @@ class EvalBackend:
         self.openai_clients = None
 
     def create_chat_completion(
-        self, system_prompt: str, user_prompt: str, response_format: dict
+        self, system_prompt: str, user_prompt: str, json_schema: dict
     ) -> dict:
         if self.local_llm:
             generated = self.local_llm.create_chat_completion(
@@ -37,7 +37,10 @@ class EvalBackend:
                         "content": user_prompt,
                     },
                 ],
-                response_format=response_format,
+                response_format={
+                    "type": "json_object",
+                    "schema": json_schema,
+                },
                 temperature=0.2,
             )
             raw_response = generated.get("choices")[0].get("message").get("content")
@@ -48,10 +51,11 @@ class EvalBackend:
                 "n_keep": -1,
                 "cache_prompt": True,
                 "prompt": [
-                    f"{system_prompt}",
-                    f"<|User|>{user_prompt}",
-                    "<|Assistant|>",
+                    system_prompt,
+                    f"<｜User｜>{user_prompt}",
+                    "<｜Assistant｜>",
                 ],
+                "json_schema": json_schema,
             }
 
             # Very naive round robin using random indices
@@ -197,10 +201,7 @@ def evaluate_language_validation(llm):
                     "content": user_prompt,
                 },
             ],
-            response_format={
-                "type": "json_object",
-                "schema": json_schema,
-            },
+            json_schema=json_schema
         )
 
         response = json.loads(generated.get("choices")[0].get("message").get("content"))
@@ -268,10 +269,7 @@ def evaluate_vandalism(
         response = eval_backend.create_chat_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            response_format={
-                "type": "json_object",
-                "schema": json_schema,
-            },
+            json_schema=json_schema
         )
 
         response["prompt"] = user_prompt
