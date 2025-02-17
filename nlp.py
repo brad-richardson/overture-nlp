@@ -63,8 +63,8 @@ class EvalBackend:
             generated = requests.post(
                 self.server_urls[server_index] + "/completion", json=request
             )
-            raw_response = generated.json()["content"]
-            return json.loads(raw_response)
+            raw_response = generated.json()
+            return json.loads(raw_response[0]["content"])
         else:
             raise RuntimeError("No eval backend setup")
 
@@ -356,35 +356,39 @@ def evaluate_prompts(
                     raise ValueError(f"Unknown eval type: {eval_type}")
 
             # Collect results as they complete
-            for future in futures:
-                try:
-                    evaluation = future.result()
+            model_results_path = f"{args.out}/{args.type}-ongoing-{datetime.now()}.json"
+            with open(model_results_path, "w") as f:
+                for future in futures:
+                    try:
+                        evaluation = future.result()
 
-                    if evaluation:
-                        if "expected_label" in evaluation:
-                            predicted_issue = evaluation["label"] != "no_issue"
-                            expected_issue = evaluation["expected_label"] not in [
-                                "no_issue",
-                                "not_an_issue",
-                            ]
-                            if predicted_issue and expected_issue:
-                                eval_result.increment_true_positive()
-                            elif not predicted_issue and not expected_issue:
-                                eval_result.increment_true_negative()
-                            elif predicted_issue and not expected_issue:
-                                eval_result.increment_false_positive()
-                            else:
-                                eval_result.increment_false_negative()
+                        if evaluation:
+                            if "expected_label" in evaluation:
+                                predicted_issue = evaluation["label"] != "no_issue"
+                                expected_issue = evaluation["expected_label"] not in [
+                                    "no_issue",
+                                    "not_an_issue",
+                                ]
+                                if predicted_issue and expected_issue:
+                                    eval_result.increment_true_positive()
+                                elif not predicted_issue and not expected_issue:
+                                    eval_result.increment_true_negative()
+                                elif predicted_issue and not expected_issue:
+                                    eval_result.increment_false_positive()
+                                else:
+                                    eval_result.increment_false_negative()
 
-                        eval_result.add_evaluation(evaluation)
-                except Exception as e:
-                    print(f"TODO - failure grabbing result, {e}")
+                            eval_result.add_evaluation(evaluation)
 
-                # Print progress every 1%
-                if len(eval_result.evaluations) % max(1, round(num_lines / 100)) == 0:
-                    print(
-                        f"{datetime.now()}: Evaluated {len(eval_result.evaluations)}/{num_lines}"
-                    )
+                            f.writelines([json.dump(evaluation, f, indent=4) + "\n"])
+                    except Exception as e:
+                        print(f"TODO - failure grabbing result, {e}")
+
+                    # Print progress every 1%
+                    if len(eval_result.evaluations) % max(1, round(num_lines / 100)) == 0:
+                        print(
+                            f"{datetime.now()}: Evaluated {len(eval_result.evaluations)}/{num_lines}"
+                        )
 
     return eval_result
 
