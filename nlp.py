@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 import json
 import pathlib
+import random
 import time
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict
@@ -11,23 +12,17 @@ from dataclasses import dataclass, field
 # import pandas as pd
 
 
-# 3.1 8B
-MODEL_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
-MODEL_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
-
-# 3.2 3B
-# MODEL_REPO = "bartowski/Llama-3.2-3B-Instruct-GGUF"
-# MODEL_FILENAME = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
-
-
 class EvalBackend:
-    def set_openai_client(self, client: openai.OpenAI):
-        self.local_llm = None
-        self.openai_client = client
+    def set_model_name(self, model_name: str):
+        self.model_name = model_name
 
-    def set_llama_model(self, model: llama_cpp.Llama):
+    def set_openai_clients(self, clients):
+        self.local_llm = None
+        self.openai_clients = clients
+
+    def set_llama_model(self, model):
         self.local_llm = model
-        self.openai_client = None
+        self.openai_clients = None
 
     def create_chat_completion(
         self, system_prompt: str, user_prompt: str, response_format: dict, **kwargs
@@ -46,9 +41,11 @@ class EvalBackend:
             )
             raw_response = generated.get("choices")[0].get("message").get("content")
             return json.loads(raw_response)
-        elif self.openai_client:
-            generated = self.openai_client.chat.completions.create(
-                model=MODEL_FILENAME,
+        elif self.openai_clients:
+            # Very naive round robin using random indices
+            client_index = random.randrange(0, len(self.openai_clients))
+            generated = self.openai_clients[client_index].chat.completions.create(
+                model=self.model_name,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -228,7 +225,7 @@ def create_vandalism_system_prompt(debug: bool = True) -> str:
 
 
 def evaluate_vandalism(
-    eval_backend,
+    eval_backend: EvalBackend,
     system_prompt: str,
     new_name: Optional[str],
     old_name: Optional[str],
@@ -291,32 +288,37 @@ def evaluate_vandalism(
 
 
 def evaluate_prompts(
-    eval_type: str, backend: str, csv_path: str, threads: int
+    eval_type: str, backend: str, csv_path: str, model_repo: str, model_name: str, server_urls: str, threads: int
 ) -> EvaluationResult:
 
     eval_backend = EvalBackend()
     if backend == "llama-cpp":
         import llama_cpp
 
-        print(f"Loading model {MODEL_FILENAME}")
+        print(f"Loading model {model_name}")
         llm = llama_cpp.Llama.from_pretrained(
-            repo_id=MODEL_REPO,
-            filename=MODEL_FILENAME,
+            repo_id=model_repo,
+            filename=model_name,
             n_ctx=4096,
             verbose=False,
         )
         eval_backend.set_llama_model(llm)
-        print(f"Loaded model {MODEL_FILENAME}")
+        print(f"Loaded model {model_name}")
 
         # Not thread-safe
         threads = 1
     elif backend == "llama-cpp-server":
         import openai
 
-        openai_client = openai.OpenAI(
-            base_url="http://localhost:8080/v1", api_key="sk-no-key-required"
-        )
-        eval_backend.set_openai_client(openai_client)
+        server_urls = server_urls.split(',')
+        clients = []
+        for server_url in server_urls:
+            openai_client = openai.OpenAI(
+                base_url=server_url, api_key="sk-no-key-required"
+            )
+            clients.append(openai_client)
+        eval_backend.set_openai_clients(clients)
+        eval_backend.set_model_name(model_name)
     else:
         raise ValueError(f"Invalid backend option: {backend}")
 
@@ -400,11 +402,15 @@ if __name__ == "__main__":
     # llama-cpp uses python library directly and is the easiest method for macOS
     # llama-cpp-server can point at a locally running service (recommended to use docker)
     parser.add_argument(
-        "--backend", choices=["llama-cpp", "llama-cpp-server"], default="llama-cpp"
+        "--backend", choices=["llama-cpp", "llama-cpp-server"], default="llama-cpp", help="whether to manage model directly (easier to get started, serial) or use server (parallel)"
     )
-    parser.add_argument("--server-url")
+    # Multiple instances needed for llama.cpp server, as cpu can be bottleneck
+    # See https://github.com/ollama/ollama/issues/7648#issuecomment-2473561990 for more details
+    parser.add_argument("--server-urls", default="http://localhost:8080/v1", help="comma-separated list of server URLs to rotate between")
     parser.add_argument("--input-csv")
-    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--model-repo", default="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF")
+    parser.add_argument("--model-name", default="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf")
 
     args = parser.parse_args()
 
@@ -416,6 +422,7 @@ if __name__ == "__main__":
     eval_result = evaluate_prompts(
         eval_type=args.type,
         backend=args.backend,
+        server_urls=args.server_urls,
         threads=args.threads,
         csv_path=input_csv,
     )

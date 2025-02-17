@@ -4,4 +4,4 @@
 MODEL_FILENAME="${MODEL_FILENAME:-Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf}"
 echo "Running with model at ./${MODEL_FILENAME}"
 
-./build/bin/llama-server --model ./models/$MODEL_FILENAME --ctx-size 16384 --parallel 8 --n-gpu-layers 20
+./llama-server --model ../../models/$MODEL_FILENAME --ctx-size 16384 --parallel 4 --n-gpu-layers 33
