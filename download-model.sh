@@ -1,4 +1,4 @@
-# /bin/sh
+#!/bin/sh
 
 # Download hugging face model for llama.cpp to serve
 # Needs hf_transfer installed:
@@ -7,10 +7,6 @@
 set -eu
 
 # Suggested models:
-
-# 3.3 70B - needs large GPU, likely not runnable locally
-# MODEL_REPO="bartowski/Llama-3.3-70B-Instruct-GGUF"
-# MODEL_FILENAME="Llama-3.3-70B-Instruct-Q4_K_M.gguf"
 
 # 3.1 8B
 # MODEL_REPO="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"

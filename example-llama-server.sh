@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # This is for running locally without docker or on unsupported platforms for docker (e.g. macOS)
 # Download binary here: https://github.com/ggml-org/llama.cpp/releases, then unzip to match directory structure
 

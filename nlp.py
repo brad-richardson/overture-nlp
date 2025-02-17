@@ -288,7 +288,13 @@ def evaluate_vandalism(
 
 
 def evaluate_prompts(
-    eval_type: str, backend: str, csv_path: str, model_repo: str, model_name: str, server_urls: str, threads: int
+    eval_type: str,
+    backend: str,
+    csv_path: str,
+    model_repo: str,
+    model_name: str,
+    server_urls: str,
+    threads: int,
 ) -> EvaluationResult:
 
     eval_backend = EvalBackend()
@@ -310,7 +316,7 @@ def evaluate_prompts(
     elif backend == "llama-cpp-server":
         import openai
 
-        server_urls = server_urls.split(',')
+        server_urls = server_urls.split(",")
         clients = []
         for server_url in server_urls:
             openai_client = openai.OpenAI(
@@ -402,15 +408,26 @@ if __name__ == "__main__":
     # llama-cpp uses python library directly and is the easiest method for macOS
     # llama-cpp-server can point at a locally running service (recommended to use docker)
     parser.add_argument(
-        "--backend", choices=["llama-cpp", "llama-cpp-server"], default="llama-cpp", help="whether to manage model directly (easier to get started, serial) or use server (parallel)"
+        "--backend",
+        choices=["llama-cpp", "llama-cpp-server"],
+        default="llama-cpp",
+        help="whether to manage model directly (easier to get started, serial) or use server (parallel)",
     )
     # Multiple instances needed for llama.cpp server, as cpu can be bottleneck
     # See https://github.com/ollama/ollama/issues/7648#issuecomment-2473561990 for more details
-    parser.add_argument("--server-urls", default="http://localhost:8080/v1", help="comma-separated list of server URLs to rotate between")
+    parser.add_argument(
+        "--server-urls",
+        default="http://localhost:8080/v1",
+        help="comma-separated list of server URLs to rotate between",
+    )
     parser.add_argument("--input-csv")
     parser.add_argument("--threads", type=int, default=2)
-    parser.add_argument("--model-repo", default="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF")
-    parser.add_argument("--model-name", default="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf")
+    parser.add_argument(
+        "--model-repo", default="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+    )
+    parser.add_argument(
+        "--model-name", default="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+    )
 
     args = parser.parse_args()
 
@@ -424,6 +441,8 @@ if __name__ == "__main__":
         backend=args.backend,
         server_urls=args.server_urls,
         threads=args.threads,
+        model_repo=args.model_repo,
+        model_name=args.model_name,
         csv_path=input_csv,
     )
     t1 = time.time()

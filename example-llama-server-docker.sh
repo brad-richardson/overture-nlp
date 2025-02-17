@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # This is for running with docker, which may be easier for CUDA-enabled environments
 # Download binaries here: https://github.com/ggml-org/llama.cpp/releases
 
