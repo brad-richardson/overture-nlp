@@ -1,14 +1,14 @@
-# Runs two identical llama.cpp servers, which at 4 parallel is enough to fully utilize an A10G (g5.xlarge on ec2) 
+# Runs three identical llama.cpp servers, which at 2 parallel each is enough to fully utilize an A10G (g5.xlarge on ec2) 
 version: "3.9"
 services:
   llama-1:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     environment:
       - GGML_CUDA_NO_PINNED=1
-      - LLAMA_ARG_MODEL=/models/${MODEL_FILENAME:-Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf}
-      - LLAMA_ARG_CTX_SIZE=8192
-      - LLAMA_ARG_N_GPU_LAYERS=99
-      - LLAMA_ARG_N_PARALLEL=2
+      - LLAMA_ARG_MODEL=$LLAMA_ARG_MODEL
+      - LLAMA_ARG_CTX_SIZE=$LLAMA_ARG_CTX_SIZE
+      - LLAMA_ARG_N_GPU_LAYERS=$LLAMA_ARG_N_GPU_LAYERS
+      - LLAMA_ARG_N_PARALLEL=$LLAMA_ARG_N_PARALLEL
     volumes:
       - ./models:/models
     ports:
@@ -24,14 +24,33 @@ services:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     environment:
       - GGML_CUDA_NO_PINNED=1
-      - LLAMA_ARG_MODEL=/models/${MODEL_FILENAME:-Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf}
-      - LLAMA_ARG_CTX_SIZE=8192
-      - LLAMA_ARG_N_GPU_LAYERS=99
-      - LLAMA_ARG_N_PARALLEL=2
+      - LLAMA_ARG_MODEL=$LLAMA_ARG_MODEL
+      - LLAMA_ARG_CTX_SIZE=$LLAMA_ARG_CTX_SIZE
+      - LLAMA_ARG_N_GPU_LAYERS=$LLAMA_ARG_N_GPU_LAYERS
+      - LLAMA_ARG_N_PARALLEL=$LLAMA_ARG_N_PARALLEL
     volumes:
       - ./models:/models
     ports:
       - 8081:8080
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  llama-3:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    environment:
+      - GGML_CUDA_NO_PINNED=1
+      - LLAMA_ARG_MODEL=$LLAMA_ARG_MODEL
+      - LLAMA_ARG_CTX_SIZE=$LLAMA_ARG_CTX_SIZE
+      - LLAMA_ARG_N_GPU_LAYERS=$LLAMA_ARG_N_GPU_LAYERS
+      - LLAMA_ARG_N_PARALLEL=$LLAMA_ARG_N_PARALLEL
+    volumes:
+      - ./models:/models
+    ports:
+      - 8082:8080
     deploy:
       resources:
         reservations:
