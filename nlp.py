@@ -208,7 +208,7 @@ def evaluate_language_validation(llm):
         return None
 
 
-def create_vandalism_system_prompt(output_reasoning: bool = True) -> str:
+def create_vandalism_system_prompt(output_reasoning: bool = False) -> str:
     return f"""
     You are a senior map QA assistant, tasked with reviewing name changes to prevent offensive content from being shown to end users.
 
@@ -231,8 +231,8 @@ def evaluate_vandalism(
     old_name: Optional[str],
     name_key: Optional[str],
     filtered_tags_json: Optional[str],
-    expected_label: Optional[str],
-    debug: bool = False,
+    additional_columns: Optional[Dict],
+    output_reasoning: bool = False,
 ) -> Optional[dict]:
     # Build user prompt
     if not new_name:
@@ -255,7 +255,7 @@ def evaluate_vandalism(
         },
         "required": ["label", "risk_score"],
     }
-    if debug:
+    if output_reasoning:
         # Adds significant overhead to generation, default to not include this
         json_schema["properties"]["reason"] = {"type": "string"}
         json_schema["required"].append("reason")
@@ -271,8 +271,10 @@ def evaluate_vandalism(
         response["prompt"] = user_prompt
         response["new_name"] = new_name
         response["old_name"] = old_name
-        if expected_label:
-            response["expected_label"] = expected_label
+        if additional_columns:
+            for col, val in additional_columns.items():
+                if val:
+                    response[col] = val
         return response
     except Exception as e:
         print(f"Error processing row: {e}")
@@ -355,7 +357,13 @@ def evaluate_prompts(
                         old_name=row.get("old_name"),
                         name_key=row.get("tag"),
                         filtered_tags_json=row.get("filtered_tags"),
-                        expected_label=row.get("label", ""),
+                        output_reasoning=output_reasoning,
+                        additional_columns={
+                            "expected_label": row.get("label", ""),
+                            "osm_id": row.get("osm_id", ""),
+                            "osm_type": row.get("osm_type", ""),
+                            "version": row.get("version", ""),
+                        }
                     )
                     futures.append(future)
                 else:
@@ -427,7 +435,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-name", default="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
     )
-    parser.add_argument("--output-reasoning", type=bool, default=False)
+    parser.add_argument("--output-reasoning", action="store_true")
 
     args = parser.parse_args()
 
