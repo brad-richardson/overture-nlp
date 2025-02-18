@@ -8,7 +8,6 @@ import time
 from datetime import datetime
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass, field
-import requests
 
 # import pandas as pd
 
@@ -17,9 +16,9 @@ class EvalBackend:
     def set_model_name(self, model_name: str):
         self.model_name = model_name
 
-    def set_llama_cpp_server_urls(self, urls: list[str]):
+    def set_openai_clients(self, clients):
         self.local_llm = None
-        self.server_urls = urls
+        self.openai_clients = clients
 
     def set_llama_model(self, model):
         self.local_llm = model
@@ -45,26 +44,23 @@ class EvalBackend:
             )
             raw_response = generated.get("choices")[0].get("message").get("content")
             return json.loads(raw_response)
-        elif self.server_urls:
-            request = {
-                "temperature": 0.2,
-                "n_keep": -1,
-                "cache_prompt": True,
-                "prompt": [
-                    system_prompt,
-                    f"<｜User｜>{user_prompt}",
-                    "<｜Assistant｜>",
-                ],
-                "json_schema": json_schema,
-            }
-
+        elif self.openai_clients:
             # Very naive round robin using random indices
-            server_index = random.randrange(0, len(self.server_urls))
-            generated = requests.post(
-                self.server_urls[server_index] + "/completion", json=request
+            client_index = random.randrange(0, len(self.openai_clients))
+            generated = self.openai_clients[client_index].chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={
+                    "type": "json_object",
+                    "schema": json_schema,
+                },
+                temperature=0.2,
             )
-            raw_response = generated.json()
-            return json.loads(raw_response[0]["content"])
+            raw_response = generated.choices[0].message.content
+            return json.loads(raw_response)
         else:
             raise RuntimeError("No eval backend setup")
 
@@ -212,7 +208,7 @@ def evaluate_language_validation(llm):
         return None
 
 
-def create_vandalism_system_prompt(debug: bool = True) -> str:
+def create_vandalism_system_prompt(output_reasoning: bool = True) -> str:
     return f"""
     You are a senior map QA assistant, tasked with reviewing name changes to prevent offensive content from being shown to end users.
 
@@ -222,7 +218,7 @@ def create_vandalism_system_prompt(debug: bool = True) -> str:
     Please provide the following:
     - a label of "vandalism", "profanity", "suspicious" or "no_issue"
     - a risk score between 0.0 and 1.0, where 0.0 indicates the name has no chance of being problematic and could appear on e.g. a car nav system and 1.0 means definitely an issue and generally offensive or unwelcome
-    {"- a brief (2 sentences) reasoning for the rating" if debug else ""}
+    {"- a brief sentence reasoning for the rating" if output_reasoning else ""}
 
     Additional prompt context may be provided, such as tag key (indicating language or special name type), previous name and the feature's OSM tags as JSON. These fields should be used as context only, and not directly considered for the output label and score.
     """
@@ -293,6 +289,7 @@ def evaluate_prompts(
     model_name: str,
     server_urls: str,
     threads: int,
+    output_reasoning: bool
 ) -> EvaluationResult:
 
     eval_backend = EvalBackend()
@@ -312,7 +309,16 @@ def evaluate_prompts(
         # Not thread-safe
         threads = 1
     elif backend == "llama-cpp-server":
-        eval_backend.set_llama_cpp_server_urls(server_urls.split(","))
+        import openai
+
+        server_urls = server_urls.split(",")
+        clients = []
+        for server_url in server_urls:
+            openai_client = openai.OpenAI(
+                base_url=server_url, api_key="sk-no-key-required"
+            )
+            clients.append(openai_client)
+        eval_backend.set_openai_clients(clients)
         eval_backend.set_model_name(model_name)
     else:
         raise ValueError(f"Invalid backend option: {backend}")
@@ -328,7 +334,7 @@ def evaluate_prompts(
 
         eval_result = EvaluationResult()
 
-        system_prompt = create_vandalism_system_prompt()
+        system_prompt = create_vandalism_system_prompt(output_reasoning=output_reasoning)
 
         results = []
         with ThreadPoolExecutor(max_workers=threads) as executor:
@@ -380,7 +386,7 @@ def evaluate_prompts(
 
                             eval_result.add_evaluation(evaluation)
 
-                            f.writelines([json.dump(evaluation, f, indent=4) + "\n"])
+                            f.writelines([json.dumps(evaluation) + "\n"])
                     except Exception as e:
                         print(f"TODO - failure grabbing result, {e}")
 
@@ -410,7 +416,7 @@ if __name__ == "__main__":
     # See https://github.com/ollama/ollama/issues/7648#issuecomment-2473561990 for more details
     parser.add_argument(
         "--server-urls",
-        default="http://localhost:8080",
+        default="http://localhost:8080/v1",
         help="comma-separated list of server URLs to rotate between",
     )
     parser.add_argument("--input-csv")
@@ -421,6 +427,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-name", default="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
     )
+    parser.add_argument("--output-reasoning", type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -437,6 +444,7 @@ if __name__ == "__main__":
         model_repo=args.model_repo,
         model_name=args.model_name,
         csv_path=input_csv,
+        output_reasoning=args.output_reasoning
     )
     t1 = time.time()
 
