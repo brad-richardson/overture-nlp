@@ -1,15 +1,14 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-import csv
 import json
 import pathlib
 import random
 import time
 from datetime import datetime
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, List, Dict
 from dataclasses import dataclass, field
 
-# import pandas as pd
+import pandas as pd
 
 
 class EvalBackend:
@@ -208,19 +207,19 @@ def evaluate_language_validation(llm):
         return None
 
 
-def create_vandalism_system_prompt(output_reasoning: bool = False) -> str:
+def create_vandalism_system_prompt(generate_reasoning: bool = False) -> str:
     return f"""
     You are a senior map QA assistant, tasked with reviewing name changes to prevent offensive content from being shown to end users.
 
-    These feature names are crowd-sourced from OpenStreetMap and could contain vandalism, profanity, vulgarities or suspicious changes (typos, test data, names from fictional works).
+    These feature name changes are crowd-sourced from OpenStreetMap and could contain vandalism, profanity, vulgarities or suspicious changes (typos, test or private data, names from fictional works).
     Note that these names may be in any language, not just English. During assessment, please consider diverse political, lingual, socioconomic and geographic viewpoints in the evaluation.
 
     Please provide the following:
-    - a label of "vandalism", "profanity", "suspicious" or "no_issue"
-    - a risk score between 0.0 and 1.0, where 0.0 indicates the name has no chance of being problematic and could appear on e.g. a car nav system and 1.0 means definitely an issue and generally offensive or unwelcome
-    {"- a brief sentence reasoning for the rating" if output_reasoning else ""}
+    - label of "vandalism", "profanity", "suspicious" or "no_issue"
+    - risk score between 0.0 and 1.0, where 0.0 indicates the name has no chance of being problematic and could appear on e.g. a car nav system and 1.0 means definitely an issue and generally offensive or unwelcome
+    {"- a brief sentence reasoning for the rating" if generate_reasoning else ""}
 
-    Additional prompt context may be provided, such as tag key (indicating language or special name type), previous name and the feature's OSM tags as JSON. These fields should be used as context only, and not directly considered for the output label and score.
+    Additional context may be provided in the request (such as OSM tags) and that information should be used as context only, not evaluated directly for the output label and score.
     """
 
 
@@ -232,19 +231,19 @@ def evaluate_vandalism(
     name_key: Optional[str],
     filtered_tags_json: Optional[str],
     additional_columns: Optional[Dict],
-    output_reasoning: bool = False,
+    generate_reasoning: bool = False,
 ) -> Optional[dict]:
     # Build user prompt
     if not new_name:
-        user_prompt = "Name was removed\n"
+        user_prompt = "Name was removed"
     else:
-        user_prompt = f"New name: '{new_name}'\n"
+        user_prompt = f"New name: '{new_name}'"
     if old_name:
-        user_prompt += f"Old name: '{old_name}'\n"
+        user_prompt += f"\nOld name: '{old_name}'"
     if name_key:
-        user_prompt += f"OSM name key: '{name_key}'\n"
+        user_prompt += f"\nOSM tag key: '{name_key}'"
     if filtered_tags_json:
-        user_prompt += f"OSM tags: {filtered_tags_json}\n"
+        user_prompt += f"\nOSM tags: {filtered_tags_json}"
 
     allowed_labels = ["vandalism", "profanity", "suspicious", "no_issue"]
     json_schema = {
@@ -255,7 +254,7 @@ def evaluate_vandalism(
         },
         "required": ["label", "risk_score"],
     }
-    if output_reasoning:
+    if generate_reasoning:
         # Adds significant overhead to generation, default to not include this
         json_schema["properties"]["reason"] = {"type": "string"}
         json_schema["required"].append("reason")
@@ -268,7 +267,8 @@ def evaluate_vandalism(
             json_schema=json_schema
         )
 
-        response["prompt"] = user_prompt
+        if generate_reasoning:
+            response["prompt"] = user_prompt
         response["new_name"] = new_name
         response["old_name"] = old_name
         if additional_columns:
@@ -284,14 +284,16 @@ def evaluate_vandalism(
 
 
 def evaluate_prompts(
+    input_csv: str,
+    input_parquet: str,
     eval_type: str,
     backend: str,
-    csv_path: str,
     model_repo: str,
     model_name: str,
     server_urls: str,
+    output_path: str,
     threads: int,
-    output_reasoning: bool
+    generate_reasoning: bool
 ) -> EvaluationResult:
 
     eval_backend = EvalBackend()
@@ -325,84 +327,84 @@ def evaluate_prompts(
     else:
         raise ValueError(f"Invalid backend option: {backend}")
 
-    # Quickly read CSV to get total row count
-    # pd.read_csv()
-    with open(csv_path, "rb") as f:
-        num_lines = sum(1 for _ in f)
+    if input_csv:
+        df = pd.read_csv(input_csv)
+    elif input_parquet:
+        df = pd.read_parquet(input_parquet)
+    else:
+        raise ValueError("Need input CSV or Parquet")
 
-    with open(csv_path, "r") as f:
-        # df = pd.read_csv(f)
-        reader = csv.DictReader(f, delimiter=",")
+    row_count = len(df)
 
-        eval_result = EvaluationResult()
+    eval_result = EvaluationResult()
 
-        system_prompt = create_vandalism_system_prompt(output_reasoning=output_reasoning)
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = []
+        system_prompt = create_vandalism_system_prompt(generate_reasoning=generate_reasoning)
 
-        results = []
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = []
+        # Submit all tasks
+        for _, row in df.iterrows():
+            if eval_type == "language-validation":
+                # TODO - update this, handle concurrency
+                # evaluation = evaluate_language_validation(eval_backend)
+                pass
+            elif eval_type == "vandalism":
+                future = executor.submit(
+                    evaluate_vandalism,
+                    eval_backend=eval_backend,
+                    system_prompt=system_prompt,
+                    new_name=row.get("new_name"),
+                    old_name=row.get("old_name"),
+                    name_key=row.get("tag"),
+                    filtered_tags_json=row.get("filtered_tags"),
+                    generate_reasoning=generate_reasoning,
+                    additional_columns={
+                        "expected_label": row.get("label", ""),
+                        "osm_id": row.get("osm_id", ""),
+                        "osm_type": row.get("osm_type", ""),
+                        "version": row.get("version", ""),
+                    }
+                )
+                futures.append(future)
+            else:
+                raise ValueError(f"Unknown eval type: {eval_type}")
 
-            # Submit all tasks
-            for row in reader:
-                if eval_type == "language-validation":
-                    # TODO - update this, handle concurrency
-                    # evaluation = evaluate_language_validation(eval_backend)
-                    pass
-                elif eval_type == "vandalism":
-                    future = executor.submit(
-                        evaluate_vandalism,
-                        eval_backend=eval_backend,
-                        system_prompt=system_prompt,
-                        new_name=row.get("new_name"),
-                        old_name=row.get("old_name"),
-                        name_key=row.get("tag"),
-                        filtered_tags_json=row.get("filtered_tags"),
-                        output_reasoning=output_reasoning,
-                        additional_columns={
-                            "expected_label": row.get("label", ""),
-                            "osm_id": row.get("osm_id", ""),
-                            "osm_type": row.get("osm_type", ""),
-                            "version": row.get("version", ""),
-                        }
+        # Collect results as they complete
+        model_results_path = f"{output_path}/{eval_type}-ongoing-{datetime.now()}.json"
+        with open(model_results_path, "w") as f:
+            for future in futures:
+                try:
+                    evaluation = future.result()
+
+                    if not evaluation:
+                        continue
+
+                    if "expected_label" in evaluation:
+                        predicted_issue = evaluation["label"] != "no_issue"
+                        expected_issue = evaluation["expected_label"] not in [
+                            "no_issue",
+                            "not_an_issue",
+                        ]
+                        if predicted_issue and expected_issue:
+                            eval_result.increment_true_positive()
+                        elif not predicted_issue and not expected_issue:
+                            eval_result.increment_true_negative()
+                        elif predicted_issue and not expected_issue:
+                            eval_result.increment_false_positive()
+                        else:
+                            eval_result.increment_false_negative()
+
+                    eval_result.add_evaluation(evaluation)
+
+                    f.writelines([json.dumps(evaluation) + "\n"])
+                except Exception as e:
+                    print(f"TODO - failure grabbing result, {e}")
+
+                # Print progress every 1%
+                if len(eval_result.evaluations) % max(1, round(row_count / 100)) == 0:
+                    print(
+                        f"{datetime.now()}: Evaluated {len(eval_result.evaluations)}/{row_count}"
                     )
-                    futures.append(future)
-                else:
-                    raise ValueError(f"Unknown eval type: {eval_type}")
-
-            # Collect results as they complete
-            model_results_path = f"{args.out}/{args.type}-ongoing-{datetime.now()}.json"
-            with open(model_results_path, "w") as f:
-                for future in futures:
-                    try:
-                        evaluation = future.result()
-
-                        if evaluation:
-                            if "expected_label" in evaluation:
-                                predicted_issue = evaluation["label"] != "no_issue"
-                                expected_issue = evaluation["expected_label"] not in [
-                                    "no_issue",
-                                    "not_an_issue",
-                                ]
-                                if predicted_issue and expected_issue:
-                                    eval_result.increment_true_positive()
-                                elif not predicted_issue and not expected_issue:
-                                    eval_result.increment_true_negative()
-                                elif predicted_issue and not expected_issue:
-                                    eval_result.increment_false_positive()
-                                else:
-                                    eval_result.increment_false_negative()
-
-                            eval_result.add_evaluation(evaluation)
-
-                            f.writelines([json.dumps(evaluation) + "\n"])
-                    except Exception as e:
-                        print(f"TODO - failure grabbing result, {e}")
-
-                    # Print progress every 1%
-                    if len(eval_result.evaluations) % max(1, round(num_lines / 100)) == 0:
-                        print(
-                            f"{datetime.now()}: Evaluated {len(eval_result.evaluations)}/{num_lines}"
-                        )
 
     return eval_result
 
@@ -410,8 +412,10 @@ def evaluate_prompts(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Overture NLP")
 
+    parser.add_argument("--input-csv")
+    parser.add_argument("--input-parquet")
     parser.add_argument("--type", choices=["language-validation", "vandalism"])
-    parser.add_argument("--out", default="./output")
+    parser.add_argument("--output", default="./output")
     # llama-cpp uses python library directly and is the easiest method for macOS
     # llama-cpp-server can point at a locally running service (recommended to use docker)
     parser.add_argument(
@@ -427,7 +431,6 @@ if __name__ == "__main__":
         default="http://localhost:8080/v1",
         help="comma-separated list of server URLs to rotate between",
     )
-    parser.add_argument("--input-csv")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument(
         "--model-repo", default="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
@@ -435,30 +438,32 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-name", default="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
     )
-    parser.add_argument("--output-reasoning", action="store_true")
+    parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
+    pathlib.Path(args.output).mkdir(parents=True, exist_ok=True)
 
-    pathlib.Path(args.out).mkdir(parents=True, exist_ok=True)
-
-    input_csv = args.input_csv
+    # Verify able to write to path and pyarrow installed
+    results_path = f"{args.output}/{args.type}-output.parquet"
+    pd.DataFrame([{"placeholder": "data"}]).to_parquet(results_path)
 
     t0 = time.time()
     eval_result = evaluate_prompts(
+        input_csv=args.input_csv,
+        input_parquet=args.input_parquet,
         eval_type=args.type,
         backend=args.backend,
         server_urls=args.server_urls,
         threads=args.threads,
         model_repo=args.model_repo,
         model_name=args.model_name,
-        csv_path=input_csv,
-        output_reasoning=args.output_reasoning
+        output_path=args.output,
+        generate_reasoning=args.debug
     )
     t1 = time.time()
-
     print(f"Total time (sec): {(t1-t0):.2f}")
-    model_results_path = f"{args.out}/{args.type}.json"
-    with open(model_results_path, "w") as f:
-        json.dump(eval_result.evaluations, f, indent=4)
     if eval_result.total_samples > 0:
         print(eval_result)
+
+    output_df = pd.DataFrame(eval_result.evaluations)
+    output_df.to_parquet(results_path)
