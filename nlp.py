@@ -196,7 +196,7 @@ def evaluate_language_validation(llm):
                     "content": user_prompt,
                 },
             ],
-            json_schema=json_schema
+            json_schema=json_schema,
         )
 
         response = json.loads(generated.get("choices")[0].get("message").get("content"))
@@ -259,28 +259,25 @@ def evaluate_vandalism(
         json_schema["properties"]["reason"] = {"type": "string"}
         json_schema["required"].append("reason")
 
-    generated = None
+    response = {}
     try:
         response = eval_backend.create_chat_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            json_schema=json_schema
+            json_schema=json_schema,
         )
-
-        if generate_reasoning:
-            response["prompt"] = user_prompt
-        response["new_name"] = new_name
-        response["old_name"] = old_name
-        if additional_columns:
-            for col, val in additional_columns.items():
-                if val:
-                    response[col] = val
-        return response
     except Exception as e:
-        print(f"Error processing row: {e}")
-        if generated:
-            print(generated)
-        return None
+        response["error"] = f"Error processing row: {e}"
+
+    if generate_reasoning:
+        response["prompt"] = user_prompt
+    response["new_name"] = new_name
+    response["old_name"] = old_name
+    if additional_columns:
+        for col, val in additional_columns.items():
+            if val:
+                response[col] = val
+    return response
 
 
 def evaluate_prompts(
@@ -293,7 +290,7 @@ def evaluate_prompts(
     server_urls: str,
     output_path: str,
     threads: int,
-    generate_reasoning: bool
+    generate_reasoning: bool,
 ) -> EvaluationResult:
 
     eval_backend = EvalBackend()
@@ -340,7 +337,9 @@ def evaluate_prompts(
 
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = []
-        system_prompt = create_vandalism_system_prompt(generate_reasoning=generate_reasoning)
+        system_prompt = create_vandalism_system_prompt(
+            generate_reasoning=generate_reasoning
+        )
 
         # Submit all tasks
         for _, row in df.iterrows():
@@ -363,7 +362,7 @@ def evaluate_prompts(
                         "osm_id": row.get("osm_id", ""),
                         "osm_type": row.get("osm_type", ""),
                         "version": row.get("version", ""),
-                    }
+                    },
                 )
                 futures.append(future)
             else:
@@ -380,7 +379,7 @@ def evaluate_prompts(
                         continue
 
                     if "expected_label" in evaluation:
-                        predicted_issue = evaluation["label"] != "no_issue"
+                        predicted_issue = evaluation.get("label", "") != "no_issue"
                         expected_issue = evaluation["expected_label"] not in [
                             "no_issue",
                             "not_an_issue",
@@ -458,7 +457,7 @@ if __name__ == "__main__":
         model_repo=args.model_repo,
         model_name=args.model_name,
         output_path=args.output,
-        generate_reasoning=args.debug
+        generate_reasoning=args.debug,
     )
     t1 = time.time()
     print(f"Total time (sec): {(t1-t0):.2f}")
